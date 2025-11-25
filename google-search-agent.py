@@ -6,6 +6,148 @@ import os
 import json
 from datetime import datetime
 import argparse
+import google.generativeai as genai
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
+# Configure Google Gemini AI
+GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
+if GOOGLE_API_KEY:
+    genai.configure(api_key=GOOGLE_API_KEY)
+    print("✅ Google Gemini AI configured successfully")
+else:
+    print("⚠️  Warning: GOOGLE_API_KEY not found in environment variables")
+    print("   Please create a .env file with your Google AI Studio API key")
+
+
+def embed_transcript_with_gemini(transcript_text):
+    """
+    Create embeddings for transcript using Google Gemini
+    """
+    try:
+        if not GOOGLE_API_KEY:
+            print("❌ Cannot embed: No Google API key configured")
+            return None
+
+        print("🔄 Creating embeddings with Google Gemini...")
+
+        result = genai.embed_content(
+            model="models/embedding-001",
+            content=transcript_text,
+            task_type="retrieval_document"
+        )
+
+        print("✅ Transcript embedded successfully")
+        return result['embedding']
+
+    except Exception as e:
+        print(f"❌ Embedding failed: {e}")
+        return None
+
+
+def save_embeddings_to_file(video_id, embeddings):
+    """
+    Save embeddings to a JSON file
+    """
+    try:
+        embeddings_data = {
+            "video_id": video_id,
+            "embeddings": embeddings,
+            "created_at": str(datetime.now())
+        }
+
+        filename = f"embeddings_{video_id}.json"
+        with open(filename, 'w', encoding='utf-8') as f:
+            json.dump(embeddings_data, f, indent=2)
+
+        print(f"💾 Embeddings saved to: {filename}")
+        return filename
+
+    except Exception as e:
+        print(f"❌ Could not save embeddings: {e}")
+        return None
+
+
+def load_embeddings_from_file(video_id):
+    """
+    Load embeddings from file
+    """
+    try:
+        filename = f"embeddings_{video_id}.json"
+        if os.path.exists(filename):
+            with open(filename, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        return None
+    except Exception as e:
+        print(f"❌ Could not load embeddings: {e}")
+        return None
+
+
+def list_available_models():
+    """
+    List available Gemini models for debugging
+    """
+    try:
+        if not GOOGLE_API_KEY:
+            return "❌ No API key configured"
+
+        models = genai.list_models()
+        print("📋 Available Gemini Models:")
+        for model in models:
+            if 'generateContent' in model.supported_generation_methods:
+                print(f"  ✅ {model.name}")
+        return True
+    except Exception as e:
+        print(f"❌ Could not list models: {e}")
+        return False
+
+def answer_question_with_gemini(question, transcript_text):
+    """
+    Answer questions using Gemini AI with transcript context
+    """
+    try:
+        if not GOOGLE_API_KEY:
+            return "❌ Cannot answer: No Google API key configured"
+
+        print(f"🤖 Answering: {question}")
+
+        model = genai.GenerativeModel('gemini-2.5-flash')
+
+        # Limit transcript context to avoid token limits
+        max_context_length = 4000
+        if len(transcript_text) > max_context_length:
+            transcript_text = transcript_text[:max_context_length] + "..."
+
+        prompt = f"""
+        You are a helpful AI assistant analyzing a YouTube video transcript.
+
+        TRANSCRIPT CONTEXT:
+        {transcript_text}
+
+        USER QUESTION:
+        {question}
+
+        INSTRUCTIONS:
+        - Answer based only on the transcript content
+        - Be accurate and helpful
+        - If the transcript doesn't contain relevant information, say so
+        - Keep answers concise but complete
+        - Answer in Turkish since the transcript is in Turkish
+
+        ANSWER:"""
+
+        response = model.generate_content(prompt)
+        answer = response.text.strip()
+
+        print("✅ Answer generated successfully")
+        return answer
+
+    except Exception as e:
+        error_msg = f"❌ Answer generation failed: {e}"
+        print(error_msg)
+        return error_msg
 
 
 def extract_video_id(url):
@@ -196,14 +338,10 @@ def process_video_smart(url, force_reembed=False):
         print("📂 Found existing transcript file")
         status = existing_data.get('status', {})
 
-        # Check if already fully processed (transcript extracted, but embedding not yet implemented)
-        if status.get('transcript_extracted') and not force_reembed:
-            print("✅ Transcript already extracted")
-            if status.get('embedded'):
-                print("✅ Video fully processed (transcript + embeddings)")
-                print(f"📅 Last embedded: {status.get('last_embedded', 'Unknown')}")
-            else:
-                print("⏳ Ready for embedding (Google RAG integration pending)")
+        # Check if already fully processed (transcript extracted AND embedded)
+        if status.get('transcript_extracted') and status.get('embedded') and not force_reembed:
+            print("✅ Video fully processed (transcript + embeddings)")
+            print(f"📅 Last embedded: {status.get('last_embedded', 'Unknown')}")
             return existing_data, video_id
 
         # Check if transcript already extracted
@@ -219,9 +357,30 @@ def process_video_smart(url, force_reembed=False):
             # Save transcript with status update
             save_transcript(video_id, transcript, url, {'transcript_extracted': True})
 
-        # Check if embedding needed (but Google RAG not yet implemented)
-        print("⏳ Google RAG integration pending - embeddings not yet created")
-        print("💭 This video is ready for Google RAG embedding implementation")
+        # Check if embedding needed
+        if not status.get('embedded') or force_reembed:
+            if force_reembed:
+                print("🔄 Force re-embedding requested...")
+            else:
+                print("🔄 Creating embeddings with Google Gemini...")
+
+            # Create embeddings with Google Gemini
+            embeddings = embed_transcript_with_gemini(transcript)
+
+            if embeddings:
+                # Save embeddings to file
+                save_embeddings_to_file(video_id, embeddings)
+
+                # Mark as embedded in transcript status
+                save_transcript(video_id, None, url, {
+                    'embedded': True,
+                    'last_embedded': str(datetime.now())
+                })
+                print("✅ Successfully embedded with Gemini AI")
+            else:
+                print("❌ Embedding failed - transcript saved but not embedded")
+        else:
+            print("✅ Embeddings already exist")
 
     else:
         print("🆕 New video - starting fresh processing...")
@@ -237,15 +396,20 @@ def process_video_smart(url, force_reembed=False):
         # Save transcript with initial status
         save_transcript(video_id, transcript, url, {'transcript_extracted': True})
 
-        # TODO: Google RAG integration - embeddings not yet implemented
-        print("🔄 Google RAG integration pending...")
-        print("💭 Embedding functionality will be implemented next")
+        # Create embeddings with Google Gemini
+        embeddings = embed_transcript_with_gemini(transcript)
 
-        # Don't mark as embedded until actual embedding is implemented
-        # save_transcript(video_id, None, url, {
-        #     'embedded': True,
-        #     'last_embedded': str(datetime.now())
-        # })
+        if embeddings:
+            # Save embeddings to file
+            save_embeddings_to_file(video_id, embeddings)
+
+            # Mark as embedded in transcript status
+            save_transcript(video_id, None, url, {
+                'embedded': True,
+                'last_embedded': str(datetime.now())
+            })
+        else:
+            print("❌ Embedding failed - transcript saved but not embedded")
 
     # Load final data
     final_data = load_transcript_data(video_id)
@@ -265,6 +429,8 @@ def main():
                        help='Force re-embedding even if already done')
     parser.add_argument('--list-processed', action='store_true',
                        help='List all processed videos')
+    parser.add_argument('--list-models', action='store_true',
+                       help='List available Gemini models')
 
     args = parser.parse_args()
 
@@ -302,6 +468,13 @@ def main():
                 print(f"⚠️  Error reading {filename}: {e}")
         return
 
+    # Handle list models option
+    if args.list_models:
+        print("🤖 Gemini Models Check:")
+        print("-" * 30)
+        list_available_models()
+        return
+
     VIDEO_URL = args.url
     print(f"🎬 Processing video: {VIDEO_URL}")
     if args.force_reembed:
@@ -322,11 +495,13 @@ def main():
     print("Type your questions below (or 'quit' to exit):")
     print("-" * 50)
 
-    # Check if running interactively
+    # Check if running interactively or has piped input
     import sys
+    import select
     is_interactive = sys.stdin.isatty() and sys.stdout.isatty()
+    has_piped_input = not sys.stdin.isatty() and select.select([sys.stdin], [], [], 0)[0]
 
-    if is_interactive:
+    if is_interactive or has_piped_input:
         # Interactive question answering loop
         print("\n" + "="*50)
         while True:
@@ -340,9 +515,17 @@ def main():
                 if not question:
                     continue
 
-                # For now, just show the question (Google RAG integration comes next)
-                print("🔍 Processing question: " + question)
-                print("💭 (Google RAG integration will be implemented next...)")
+                # Answer the question using Gemini AI with transcript context
+                transcript_text = transcript_data.get('transcript', '')
+
+                if not transcript_text:
+                    print("❌ No transcript available for this video")
+                    continue
+
+                answer = answer_question_with_gemini(question, transcript_text)
+
+                print(f"\n📝 Answer: {answer}")
+                print("-" * 50)
 
             except KeyboardInterrupt:
                 print("\n👋 Goodbye!")

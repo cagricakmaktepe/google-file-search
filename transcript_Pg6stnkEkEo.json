@@ -1,0 +1,11 @@
+{
+  "video_id": "Pg6stnkEkEo",
+  "url": "https://www.youtube.com/watch?v=Pg6stnkEkEo&list=PLXrRC--1DgPab9DaC_WSUsrMEeMa3uhD7&index=3",
+  "transcript": "[Müzik] [Müzik] Merhabalar ben Logan ensesi yerli ürün yönetimi ekibinden Alper Bu videoda 9.046 sürümüyle beraber desteklenen Maliyet Muhasebesi işlemindeki 64 bit desteğinden bahsediyor olacağım Maliyet Muhasebesi işlemi bilgisayarın hafızasında yani memori üzerinde çalıştığı için özellikle aylık stok hareket sayılarının yüksek olduğu müşteri verilerinde 32 bit mimardan kaynaklanan hafıza limitlerine takılma riski ortaya çıkmaktadır bu tarz durumları aşabilmek için Maliyet Muhasebesi modülündeki Maliyet Muhasebesi parametleri ekranında işlemin 64 bit çalışabilmesi amacıyla Maliyet Muhasebesi 64 bin servis üzerinden çalıştırılsın şeklinde yeni bir parametre eklenmiştir bu parametre seçilerek Maliyet Muhasebesi ve mahsup oluşturma işlemlerinin 64 diş servis üzerinden çalıştırılabilmesi ve hafıza limitlerine takılmadan işlemin gerçekleştirilebilmesi sağlanabilmektedir teşekkürler",
+  "timestamp": "2025-11-26 00:07:08.853355",
+  "status": {
+    "transcript_extracted": true,
+    "embedded": true,
+    "last_embedded": "2025-11-26 00:07:09.273250"
+  }
+}
