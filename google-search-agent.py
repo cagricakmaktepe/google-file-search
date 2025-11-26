@@ -310,13 +310,14 @@ def process_youtube_video(url):
     return transcript, video_id
 
 
-def process_video_smart(url, force_reembed=False):
+def process_video_smart(url, force_reembed=False, do_embedding=True):
     """
     Smart video processing that checks status and only does necessary work
 
     Args:
         url: YouTube video URL
         force_reembed: Force re-embedding even if already done
+        do_embedding: Whether to create embeddings (default: True)
 
     Returns:
         tuple: (transcript_data, video_id) or (None, None) if failed
@@ -357,8 +358,8 @@ def process_video_smart(url, force_reembed=False):
             # Save transcript with status update
             save_transcript(video_id, transcript, url, {'transcript_extracted': True})
 
-        # Check if embedding needed
-        if not status.get('embedded') or force_reembed:
+        # Check if embedding needed (only if do_embedding is True)
+        if do_embedding and (not status.get('embedded') or force_reembed):
             if force_reembed:
                 print("🔄 Force re-embedding requested...")
             else:
@@ -379,6 +380,8 @@ def process_video_smart(url, force_reembed=False):
                 print("✅ Successfully embedded with Gemini AI")
             else:
                 print("❌ Embedding failed - transcript saved but not embedded")
+        elif not do_embedding:
+            print("⏭️  Embedding skipped (transcript only mode)")
         else:
             print("✅ Embeddings already exist")
 
@@ -396,20 +399,23 @@ def process_video_smart(url, force_reembed=False):
         # Save transcript with initial status
         save_transcript(video_id, transcript, url, {'transcript_extracted': True})
 
-        # Create embeddings with Google Gemini
-        embeddings = embed_transcript_with_gemini(transcript)
+        # Create embeddings with Google Gemini (only if do_embedding is True)
+        if do_embedding:
+            embeddings = embed_transcript_with_gemini(transcript)
 
-        if embeddings:
-            # Save embeddings to file
-            save_embeddings_to_file(video_id, embeddings)
+            if embeddings:
+                # Save embeddings to file
+                save_embeddings_to_file(video_id, embeddings)
 
-            # Mark as embedded in transcript status
-            save_transcript(video_id, None, url, {
-                'embedded': True,
-                'last_embedded': str(datetime.now())
-            })
+                # Mark as embedded in transcript status
+                save_transcript(video_id, None, url, {
+                    'embedded': True,
+                    'last_embedded': str(datetime.now())
+                })
+            else:
+                print("❌ Embedding failed - transcript saved but not embedded")
         else:
-            print("❌ Embedding failed - transcript saved but not embedded")
+            print("⏭️  Embedding skipped (transcript only mode)")
 
     # Load final data
     final_data = load_transcript_data(video_id)
@@ -427,6 +433,8 @@ def main():
                        help='YouTube video URL to process')
     parser.add_argument('--force-reembed', action='store_true',
                        help='Force re-embedding even if already done')
+    parser.add_argument('--no-embed', action='store_true',
+                       help='Skip embedding creation (transcript only)')
     parser.add_argument('--list-processed', action='store_true',
                        help='List all processed videos')
     parser.add_argument('--list-models', action='store_true',
@@ -479,10 +487,13 @@ def main():
     print(f"🎬 Processing video: {VIDEO_URL}")
     if args.force_reembed:
         print("🔄 Force re-embedding enabled")
+    if args.no_embed:
+        print("⏭️  Embedding disabled (transcript only)")
     print()
 
-    # Use smart processing
-    transcript_data, video_id = process_video_smart(VIDEO_URL, args.force_reembed)
+    # Use smart processing with embedding control
+    do_embedding = False
+    transcript_data, video_id = process_video_smart(VIDEO_URL, args.force_reembed, do_embedding)
 
     if not transcript_data:
         print("❌ Failed to process video. Exiting...")
