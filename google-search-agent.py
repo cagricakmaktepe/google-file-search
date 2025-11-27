@@ -8,6 +8,8 @@ from datetime import datetime
 import argparse
 import google.generativeai as genai
 from dotenv import load_dotenv
+import requests
+from bs4 import BeautifulSoup
 
 # Load environment variables
 load_dotenv()
@@ -20,6 +22,148 @@ if GOOGLE_API_KEY:
 else:
     print("⚠️  Warning: GOOGLE_API_KEY not found in environment variables")
     print("   Please create a .env file with your Google AI Studio API key")
+
+# Global variable to store video titles
+video_titles = {}
+
+
+def is_playlist_url(url):
+    """
+    Check if the URL is a YouTube playlist URL
+    Returns True only for full playlist URLs (no video ID)
+    Returns False for single videos (even if they have a list parameter)
+    """
+    try:
+        parsed_url = urlparse(url)
+        if 'youtube.com' in url:
+            query_params = parse_qs(parsed_url.query)
+            
+            # If there's a video ID ('v'), it's a single video, not a full playlist page
+            if 'v' in query_params:
+                return False
+                
+            # If there's list but no video ID, it's a full playlist
+            if 'list' in query_params:
+                return True
+        return False
+    except:
+        return False
+
+
+def extract_playlist_id(url):
+    """
+    Extract playlist ID from YouTube playlist URL
+    """
+    try:
+        parsed_url = urlparse(url)
+        if 'list' in parse_qs(parsed_url.query):
+            return parse_qs(parsed_url.query)['list'][0]
+        return None
+    except:
+        return None
+
+
+def get_playlist_video_ids(playlist_id):
+    """
+    Extract all video IDs from a YouTube playlist using web scraping
+    Returns list of video IDs
+    """
+    try:
+        # Use YouTube's public playlist page
+        api_url = f"https://www.youtube.com/playlist?list={playlist_id}"
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+
+        response = requests.get(api_url, headers=headers)
+        response.raise_for_status()
+
+        # Parse the HTML to find video IDs in ytInitialData
+        soup = BeautifulSoup(response.text, 'html.parser')
+
+        videos_info = []  # List of {'id': video_id, 'title': title}
+
+        # Look for ytInitialData script containing playlist data
+        scripts = soup.find_all('script')
+        for script in scripts:
+            if script.string and 'ytInitialData' in script.string:
+                try:
+                    # Extract the JSON data from the script
+                    json_start = script.string.find('var ytInitialData = ') + len('var ytInitialData = ')
+                    json_end = script.string.find('};', json_start) + 1
+                    json_data = script.string[json_start:json_end]
+
+                    import json
+                    data = json.loads(json_data)
+
+                    # Navigate through the JSON structure to find video IDs and titles
+                    def extract_video_info_from_json(obj, videos):
+                        if isinstance(obj, dict):
+                            # Look for videoId and title together
+                            if 'videoId' in obj and isinstance(obj['videoId'], str):
+                                video_id = obj['videoId']
+                                title = "Unknown Title"
+
+                                # Try to extract title from various possible locations
+                                if 'title' in obj:
+                                    title_obj = obj['title']
+                                    if isinstance(title_obj, str):
+                                        title = title_obj
+                                    elif isinstance(title_obj, dict) and 'runs' in title_obj:
+                                        runs = title_obj['runs']
+                                        if runs and isinstance(runs[0], dict) and 'text' in runs[0]:
+                                            title = runs[0]['text']
+                                    elif isinstance(title_obj, dict) and 'simpleText' in title_obj:
+                                        title = title_obj['simpleText']
+
+                                videos.append({'id': video_id, 'title': title})
+
+                            for value in obj.values():
+                                extract_video_info_from_json(value, videos)
+                        elif isinstance(obj, list):
+                            for item in obj:
+                                extract_video_info_from_json(item, videos)
+
+                    extract_video_info_from_json(data, videos_info)
+
+                    break
+                except Exception as e:
+                    print(f"⚠️  Error parsing ytInitialData: {e}")
+                    continue
+
+        # Fallback: Look for video links in the HTML
+        if not videos_info:
+            for link in soup.find_all('a', href=True):
+                href = link['href']
+                if 'watch?v=' in href and 'list=' in href:
+                    video_id = extract_video_id(f"https://youtube.com{href}")
+                    if video_id:
+                        videos_info.append({'id': video_id, 'title': 'Unknown Title'})
+
+        # Remove duplicates and filter valid video IDs
+        seen_ids = set()
+        filtered_videos = []
+        for video in videos_info:
+            if len(video['id']) == 11 and video['id'] not in seen_ids:
+                filtered_videos.append(video)
+                seen_ids.add(video['id'])
+
+        videos_info = filtered_videos
+
+        print(f"📋 Found {len(videos_info)} videos in playlist")
+        for video in videos_info[:3]:  # Show first 3 as sample
+            print(f"   • {video['id']} - {video['title']}")
+
+        # Store titles globally for use in processing
+        global video_titles
+        video_titles = {v['id']: v['title'] for v in videos_info}
+
+        # Return just the IDs for backward compatibility
+        return [v['id'] for v in videos_info]
+
+    except Exception as e:
+        print(f"❌ Error extracting playlist videos: {e}")
+        return []
 
 
 def embed_transcript_with_gemini(transcript_text):
@@ -219,18 +363,28 @@ def get_video_transcript(video_id, languages=None):
         return None
 
 
-def save_transcript(video_id, transcript, url, status_updates=None):
+def save_transcript(video_id, transcript, url, status_updates=None, video_title=None):
     """
-    Save transcript to a JSON file for later use with status tracking
+    Save transcript to transcripts/ folder with organized naming
 
     Args:
         video_id: YouTube video ID
         transcript: Transcript text
         url: Original video URL
         status_updates: Dict of status updates to merge (optional)
+        video_title: Video title for better filename (optional)
     """
     try:
-        filename = f"transcript_{video_id}.json"
+        # Create transcripts folder if it doesn't exist
+        os.makedirs('transcripts', exist_ok=True)
+
+        # Generate filename with video title if available
+        if video_title:
+            # Clean title for filename
+            clean_title = re.sub(r'[^\w\s-]', '', video_title).replace(' ', '_')[:50]
+            filename = f"transcripts/transcript_{video_id}_{clean_title}.json"
+        else:
+            filename = f"transcripts/transcript_{video_id}.json"
 
         # Load existing data if file exists, otherwise create new
         if os.path.exists(filename):
@@ -239,7 +393,8 @@ def save_transcript(video_id, transcript, url, status_updates=None):
         else:
             transcript_data = {
                 "video_id": video_id,
-                "url": url
+                "url": url,
+                "title": video_title or "Unknown Title"
             }
 
         # Update transcript data
@@ -310,7 +465,71 @@ def process_youtube_video(url):
     return transcript, video_id
 
 
-def process_video_smart(url, force_reembed=False, do_embedding=True):
+def process_playlist(url, force_reembed=False, do_embedding=True):
+    """
+    Process all videos in a YouTube playlist
+
+    Args:
+        url: YouTube playlist URL
+        force_reembed: Force re-embedding even if already done
+        do_embedding: Whether to create embeddings
+
+    Returns:
+        tuple: (processed_videos, failed_videos)
+    """
+    print(f"🎬 Processing YouTube Playlist: {url}")
+
+    # Extract playlist ID
+    playlist_id = extract_playlist_id(url)
+    if not playlist_id:
+        print("❌ Could not extract playlist ID from URL")
+        return [], []
+
+    print(f"📋 Playlist ID: {playlist_id}")
+
+    # Get all video info (IDs + titles) from playlist
+    video_ids = get_playlist_video_ids(playlist_id)
+    if not video_ids:
+        print("❌ Could not extract video information from playlist")
+        return [], []
+
+    # Video titles are now available in global video_titles dict
+
+    processed_videos = []
+    failed_videos = []
+
+    print(f"🚀 Starting batch processing of {len(video_ids)} videos...")
+    print("-" * 60)
+
+    for i, video_id in enumerate(video_ids, 1):
+        video_title = video_titles.get(video_id, "Unknown Title")
+        print(f"\n📹 Processing Video {i}/{len(video_ids)}: {video_id} - {video_title}")
+
+        # Construct video URL
+        video_url = f"https://www.youtube.com/watch?v={video_id}&list={playlist_id}"
+
+        # Process the video with title
+        video_title = video_titles.get(video_id, "Unknown Title")
+        transcript_data, processed_video_id = process_video_smart(video_url, force_reembed, do_embedding, video_title)
+
+        if transcript_data and processed_video_id:
+            processed_videos.append(processed_video_id)
+            print(f"✅ Video {i} processed successfully")
+        else:
+            failed_videos.append(video_id)
+            print(f"❌ Video {i} failed to process")
+
+        print("-" * 40)
+
+    print(f"\n🎯 Playlist processing complete!")
+    print(f"✅ Successfully processed: {len(processed_videos)} videos")
+    if failed_videos:
+        print(f"❌ Failed videos: {len(failed_videos)} - {failed_videos}")
+
+    return processed_videos, failed_videos
+
+
+def process_video_smart(url, force_reembed=False, do_embedding=True, video_title=None):
     """
     Smart video processing that checks status and only does necessary work
 
@@ -318,6 +537,7 @@ def process_video_smart(url, force_reembed=False, do_embedding=True):
         url: YouTube video URL
         force_reembed: Force re-embedding even if already done
         do_embedding: Whether to create embeddings (default: True)
+        video_title: Video title (optional)
 
     Returns:
         tuple: (transcript_data, video_id) or (None, None) if failed
@@ -356,7 +576,7 @@ def process_video_smart(url, force_reembed=False, do_embedding=True):
                 print("❌ Could not get transcript for this video")
                 return None, None
             # Save transcript with status update
-            save_transcript(video_id, transcript, url, {'transcript_extracted': True})
+            save_transcript(video_id, transcript, url, {'transcript_extracted': True}, video_title)
 
         # Check if embedding needed (only if do_embedding is True)
         if do_embedding and (not status.get('embedded') or force_reembed):
@@ -376,7 +596,7 @@ def process_video_smart(url, force_reembed=False, do_embedding=True):
                 save_transcript(video_id, None, url, {
                     'embedded': True,
                     'last_embedded': str(datetime.now())
-                })
+                }, video_title)
                 print("✅ Successfully embedded with Gemini AI")
             else:
                 print("❌ Embedding failed - transcript saved but not embedded")
@@ -397,7 +617,7 @@ def process_video_smart(url, force_reembed=False, do_embedding=True):
         print(f"✅ Got transcript ({len(transcript)} characters)")
 
         # Save transcript with initial status
-        save_transcript(video_id, transcript, url, {'transcript_extracted': True})
+        save_transcript(video_id, transcript, url, {'transcript_extracted': True}, video_title)
 
         # Create embeddings with Google Gemini (only if do_embedding is True)
         if do_embedding:
@@ -411,7 +631,7 @@ def process_video_smart(url, force_reembed=False, do_embedding=True):
                 save_transcript(video_id, None, url, {
                     'embedded': True,
                     'last_embedded': str(datetime.now())
-                })
+                }, video_title)
             else:
                 print("❌ Embedding failed - transcript saved but not embedded")
         else:
@@ -429,7 +649,7 @@ def main():
     """
     parser = argparse.ArgumentParser(description='Google RAG Video Q&A Agent')
     parser.add_argument('--url', type=str,
-                       default="https://www.youtube.com/watch?v=Pg6stnkEkEo&list=PLXrRC--1DgPab9DaC_WSUsrMEeMa3uhD7&index=3",
+                       default="https://www.youtube.com/watch?v=Pg6stnkEkEo&list=PLXrRC--1DgPab9DaC_WSUsrMEeMa3uhD7&index=5",
                        help='YouTube video URL to process')
     parser.add_argument('--force-reembed', action='store_true',
                        help='Force re-embedding even if already done')
@@ -484,16 +704,54 @@ def main():
         return
 
     VIDEO_URL = args.url
-    print(f"🎬 Processing video: {VIDEO_URL}")
-    if args.force_reembed:
-        print("🔄 Force re-embedding enabled")
-    if args.no_embed:
-        print("⏭️  Embedding disabled (transcript only)")
-    print()
 
-    # Use smart processing with embedding control
-    do_embedding = False
-    transcript_data, video_id = process_video_smart(VIDEO_URL, args.force_reembed, do_embedding)
+    # Check if this is a playlist URL
+    if is_playlist_url(VIDEO_URL):
+        print(f"🎬 Processing YouTube Playlist: {VIDEO_URL}")
+        if args.force_reembed:
+            print("🔄 Force re-embedding enabled")
+        if args.no_embed:
+            print("⏭️  Embedding disabled (transcript only)")
+        print()
+
+        # Process the entire playlist
+        do_embedding = False  # User's preference: no embedding for now
+        processed_videos, failed_videos = process_playlist(VIDEO_URL, args.force_reembed, do_embedding)
+
+        print(f"\n🎯 Batch processing complete!")
+        print(f"📊 Results: {len(processed_videos)} successful, {len(failed_videos)} failed")
+
+        # Show summary of processed videos
+        if processed_videos:
+            print("\n📋 Processed Videos:")
+            for video_id in processed_videos:
+                transcript_file = f"transcripts/transcript_{video_id}.json"
+                if os.path.exists(transcript_file):
+                    try:
+                        with open(transcript_file, 'r', encoding='utf-8') as f:
+                            data = json.load(f)
+                            title = data.get('title', 'Unknown Title')
+                            status = data.get('status', {})
+                            embedded = "✅" if status.get('embedded') else "⏭️"
+                            print(f"  {embedded} {video_id} - {title}")
+                    except:
+                        print(f"  ❓ {video_id} - Could not read file")
+
+        return
+
+    else:
+        # Single video processing (existing logic)
+        print(f"🎬 Processing single video: {VIDEO_URL}")
+        if args.force_reembed:
+            print("🔄 Force re-embedding enabled")
+        if args.no_embed:
+            print("⏭️  Embedding disabled (transcript only)")
+        print()
+
+        # Use smart processing with embedding control
+        do_embedding = False  # User's preference: no embedding for now
+        video_title = "Unknown Title"  # For single videos, we'll use unknown title for now
+        transcript_data, video_id = process_video_smart(VIDEO_URL, args.force_reembed, do_embedding, video_title)
 
     if not transcript_data:
         print("❌ Failed to process video. Exiting...")
