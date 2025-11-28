@@ -1,7 +1,8 @@
 import re
 from urllib.parse import urlparse, parse_qs
-from youtube_transcript_api import YouTubeTranscriptApi
-from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFound
+import yt_dlp
+import time
+import random
 import os
 import json
 from datetime import datetime
@@ -330,37 +331,132 @@ def extract_video_id(url):
 
 def get_video_transcript(video_id, languages=None):
     """
-    Get transcript from YouTube video using video ID
-    Returns the transcript text or None if not available
+    Get transcript from YouTube video using yt-dlp library.
+    This method is more robust against IP blocking than standard scraping.
 
     Args:
         video_id: YouTube video ID
         languages: List of language codes in priority order (e.g., ['tr', 'en'])
                   If None, defaults to Turkish first, then English
+
+    Returns:
+        tuple: (transcript_text, video_title)
     """
     if languages is None:
         languages = ['tr', 'en']  # Turkish first, English as fallback
 
+    print(f"📥 Fetching transcript for video {video_id} using yt-dlp...")
+    
+    # Check for cookies.txt
+    cookies_file = 'cookies.txt'
+    has_cookies = os.path.exists(cookies_file)
+    if has_cookies:
+        print(f"🍪 Found cookies.txt, using for authentication")
+
+    # Configure yt-dlp options
+    ydl_opts = {
+        'skip_download': True,      # Don't download the video
+        'writesubtitles': True,     # Download subtitles
+        'writeautomaticsub': True,  # Download auto-generated subs too
+        'subtitleslangs': languages, # Preferred languages
+        'quiet': True,              # Less terminal noise
+        'no_warnings': True,
+        'cookiefile': cookies_file if has_cookies else None, # Use cookies if available
+        'sleep_interval': 5,        # Internal rate limiting for safety
+        'max_sleep_interval': 10,
+        'format': 'best',
+        'ignoreerrors': True,
+    }
+
     try:
-        api = YouTubeTranscriptApi()
-        transcript = api.fetch(video_id, languages=languages)
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            # Get video info
+            url = f"https://www.youtube.com/watch?v={video_id}"
+            info = ydl.extract_info(url, download=False)
+            
+            video_title = info.get('title', 'Unknown Title')
+            
+            # Check for subtitles
+            subtitles = info.get('subtitles') or {}
+            auto_subtitles = info.get('automatic_captions') or {}
+            
+            # Find the best matching language
+            found_sub_url = None
+            found_lang = None
+            
+            # 1. Check manual subtitles first
+            for lang in languages:
+                if lang in subtitles:
+                    # Usually multiple formats, prefer 'vtt' or 'json3'
+                    for fmt in subtitles[lang]:
+                        if fmt['ext'] == 'json3':
+                            found_sub_url = fmt['url']
+                            found_lang = lang
+                            break
+                    if found_sub_url: break
+            
+            # 2. Check automatic subtitles if no manual found
+            if not found_sub_url:
+                for lang in languages:
+                    if lang in auto_subtitles:
+                        for fmt in auto_subtitles[lang]:
+                            if fmt['ext'] == 'json3':
+                                found_sub_url = fmt['url']
+                                found_lang = lang
+                                break
+                        if found_sub_url: break
+            
+            if not found_sub_url:
+                print(f"❌ No subtitles found in languages: {languages}")
+                return None, video_title
+                
+            print(f"✅ Found subtitle in language: {found_lang}")
+            
+            # Download the subtitle JSON
+            # We must use cookies if we have them, otherwise requests will be blocked
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'Referer': f'https://www.youtube.com/watch?v={video_id}',
+            }
+            
+            cookies_dict = {}
+            if has_cookies:
+                try:
+                    with open(cookies_file, 'r') as f:
+                        for line in f:
+                            if not line.startswith('#') and line.strip():
+                                parts = line.split('\t')
+                                if len(parts) >= 7:
+                                    cookies_dict[parts[5]] = parts[6].strip()
+                except Exception as e:
+                    print(f"⚠️  Error parsing cookies.txt: {e}")
 
-        # Combine all transcript pieces into one text
-        transcript_text = ""
-        for entry in transcript:
-            transcript_text += entry.text + " "
+            # Use requests with cookies
+            response = requests.get(found_sub_url, headers=headers, cookies=cookies_dict)
+            response.raise_for_status()
+            
+            sub_data = response.json()
+            
+            # Extract text from JSON3 format
+            full_text = []
+            if 'events' in sub_data:
+                for event in sub_data['events']:
+                    # Some events are just metadata and don't have 'segs'
+                    if 'segs' in event:
+                        for seg in event['segs']:
+                            if 'utf8' in seg and seg['utf8'] != '\n':
+                                full_text.append(seg['utf8'])
+            
+            transcript_text = "".join(full_text).strip()
+            
+            # Simple cleanup of extra spaces
+            transcript_text = re.sub(r'\s+', ' ', transcript_text)
+            
+            return transcript_text, video_title
 
-        return transcript_text.strip()
-
-    except TranscriptsDisabled:
-        print("Transcripts are disabled for this video")
-        return None
-    except NoTranscriptFound:
-        print(f"No transcript available for this video in languages: {languages}")
-        return None
     except Exception as e:
-        print(f"Error getting transcript: {e}")
-        return None
+        print(f"❌ Error getting transcript with yt-dlp: {e}")
+        return None, "Unknown Title"
 
 
 def save_transcript(video_id, transcript, url, status_updates=None, video_title=None):
@@ -379,7 +475,7 @@ def save_transcript(video_id, transcript, url, status_updates=None, video_title=
         os.makedirs('transcripts', exist_ok=True)
 
         # Generate filename with video title if available
-        if video_title:
+        if video_title and video_title != "Unknown Title":
             # Clean title for filename
             clean_title = re.sub(r'[^\w\s-]', '', video_title).replace(' ', '_')[:50]
             filename = f"transcripts/transcript_{video_id}_{clean_title}.json"
@@ -455,7 +551,7 @@ def process_youtube_video(url):
     print(f"Extracted video ID: {video_id}")
 
     # Get transcript
-    transcript = get_video_transcript(video_id)
+    transcript, video_title = get_video_transcript(video_id)
     if not transcript:
         print("Could not get transcript for this video")
         return None, None
@@ -502,6 +598,12 @@ def process_playlist(url, force_reembed=False, do_embedding=True):
     print("-" * 60)
 
     for i, video_id in enumerate(video_ids, 1):
+        # 🛑 GÜVENLİK BEKLEMESİ (Sadece ilk video hariç)
+        if i > 1:
+            wait_time = random.uniform(5, 12) # 5 ile 12 saniye arası rastgele
+            print(f"⏳ Waiting {wait_time:.1f} seconds to avoid YouTube block...")
+            time.sleep(wait_time)
+
         video_title = video_titles.get(video_id, "Unknown Title")
         print(f"\n📹 Processing Video {i}/{len(video_ids)}: {video_id} - {video_title}")
 
@@ -571,7 +673,13 @@ def process_video_smart(url, force_reembed=False, do_embedding=True, video_title
             transcript = existing_data.get('transcript')
         else:
             print("📝 Extracting transcript...")
-            transcript = get_video_transcript(video_id)
+            # Note: get_video_transcript now returns tuple (transcript, title)
+            transcript, fetched_title = get_video_transcript(video_id)
+            
+            # Update video title if we got a better one from yt-dlp
+            if fetched_title and fetched_title != "Unknown Title":
+                video_title = fetched_title
+                
             if not transcript:
                 print("❌ Could not get transcript for this video")
                 return None, None
@@ -609,7 +717,13 @@ def process_video_smart(url, force_reembed=False, do_embedding=True, video_title
         print("🆕 New video - starting fresh processing...")
 
         # Get transcript
-        transcript = get_video_transcript(video_id)
+        # Note: get_video_transcript now returns tuple (transcript, title)
+        transcript, fetched_title = get_video_transcript(video_id)
+        
+        # Update video title if we got a better one from yt-dlp
+        if fetched_title and fetched_title != "Unknown Title":
+            video_title = fetched_title
+            
         if not transcript:
             print("❌ Could not get transcript for this video")
             return None, None
@@ -649,7 +763,7 @@ def main():
     """
     parser = argparse.ArgumentParser(description='Google RAG Video Q&A Agent')
     parser.add_argument('--url', type=str,
-                       default="https://www.youtube.com/watch?v=Pg6stnkEkEo&list=PLXrRC--1DgPab9DaC_WSUsrMEeMa3uhD7&index=5",
+                       default="https://www.youtube.com/watch?v=Pg6stnkEkEo&list=PLTB38N73SAXtABJiU3PUQXFkQSnTRt5oP&index=2",
                        help='YouTube video URL to process')
     parser.add_argument('--force-reembed', action='store_true',
                        help='Force re-embedding even if already done')
@@ -749,7 +863,7 @@ def main():
         print()
 
         # Use smart processing with embedding control
-        do_embedding = False  # User's preference: no embedding for now
+        do_embedding = True  # User's preference: no embedding for now
         video_title = "Unknown Title"  # For single videos, we'll use unknown title for now
         transcript_data, video_id = process_video_smart(VIDEO_URL, args.force_reembed, do_embedding, video_title)
 

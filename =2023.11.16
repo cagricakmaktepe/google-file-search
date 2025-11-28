@@ -1,0 +1,9 @@
+Collecting yt-dlp
+  Downloading yt_dlp-2025.11.12-py3-none-any.whl.metadata (180 kB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 180.0/180.0 kB 1.6 MB/s eta 0:00:00
+
+Downloading yt_dlp-2025.11.12-py3-none-any.whl (3.3 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 3.3/3.3 MB 17.2 MB/s eta 0:00:00
+
+Installing collected packages: yt-dlp
+Successfully installed yt-dlp-2025.11.12
